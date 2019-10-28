@@ -1,224 +1,151 @@
 using Statistics, Printf
-using ArgParse
-
-using CUDAnative, CuArrays
-using GPUifyLoops: @launch, @loop
 
 using Oceananigans
-using Oceananigans: device, launch_config, cell_advection_timescale, fill_halo_regions!, zero_halo_regions!, normalize_horizontal_sum!
+using Oceananigans.AbstractOperations
 
-s = ArgParseSettings(description="Run simulations of a stratified fluid forced by surface heat fluxes and wind" *
-                     "stresses, simulating an oceanic boundary layer that develops a deepening mixed layer.")
+using Oceananigans: Cell, Face, cell_advection_timescale
 
-@add_arg_table s begin
-    "--horizontal-resolution", "-N"
-        arg_type=Int
-        required=true
-        dest_name="Nh"
-        help="Number of grid points in the horizontal (Nx, Ny) = (N, N)."
-    "--vertical-resolution", "-V"
-        arg_type=Int
-        required=true
-        dest_name="Nz"
-        help="Number of grid points in the vertical Nz."
-    "--length", "-L"
-        arg_type=Float64
-        required=true
-        dest_name="L"
-        help="Horizontal size of the domain (Lx, Ly) = (L, L) [meters] ."
-    "--height", "-H"
-        arg_type=Float64
-        required=true
-        dest_name="H"
-        help="Vertical height (or depth) of the domain Lz [meters]."
-    "--dTdz"
-        arg_type=Float64
-        required=true
-        dest_name="∂T∂z"
-        help="Temperature gradient (stratification) to impose [K/m]."
-    "--heat-flux", "-Q"
-        arg_type=Float64
-        required=true
-        dest_name="Q"
-        help="Heat flux to impose at the surface [W/m²]. Negative values imply a cooling flux."
-    "--wind-stress"
-        arg_type=Float64
-        required=true
-        dest_name="τ"
-        help="Wind stress to impose at the surface in the x-direction [N/m²]."
-    "--days"
-        arg_type=Float64
-        required=true
-        dest_name="days"
-        help="Number of days to run the simulation."
-    "--output-dir", "-d"
-        arg_type=AbstractString
-        required=true
-        dest_name="base_dir"
-        help="Base directory to save output to."
-end
-
-parsed_args = parse_args(s)
-parse_int(n) = isinteger(n) ? Int(n) : n
-Nh, Nz, L, H, Q, τ, ∂T∂z, days = [parsed_args[k] for k in ["Nh", "Nz", "L", "H", "Q", "τ", "∂T∂z", "days"]]
-Nh, Nz, L, H, Q, τ, ∂T∂z, days = parse_int.([Nh, Nz, L, H, Q, τ, ∂T∂z, days])
-
-base_dir = parsed_args["base_dir"]
-if !isdir(base_dir)
-    @info "Creating directory: $base_dir"
-    mkpath(base_dir)
-end
-
-# Filename prefix for output files.
-prefix = @sprintf("mixed_layer_simulation_Q%d_dTdz%.3f_tau%.2f", Q, ∂T∂z, τ)
-
-# Physical constants.
-ρ₀ = 1027  # Density of seawater [kg/m³]
-cₚ = 4000  # Specific heat capacity of seawater at constant pressure [J/(kg·K)]
-
-# We impose the wind stress Fu as a flux at the surface.
-# To impose a flux boundary condition, the top flux imposed should be negative
-# for a heating flux and positive for a cooling flux, thus the minus sign on Fθ.
-Fu = τ / ρ₀
-Fθ = -Q / (ρ₀*cₚ)
-
-# Model parameters
+# Float type and architecture
 FT = Float64
 arch = GPU()
-Nx, Ny, Nz = Nh, Nh, Nz
-Lx, Ly, Lz = L, L, H
-end_time = days * day
 
-ubcs = HorizontallyPeriodicBCs(   top = BoundaryCondition(Flux, Fu))
-Tbcs = HorizontallyPeriodicBCs(   top = BoundaryCondition(Flux, Fθ),
-                               bottom = BoundaryCondition(Gradient, ∂T∂z))
+# Resolution
+Nx = 256
+Ny = 256
+Nz = 256
+
+# Domain size
+Lx = 100
+Ly = 100
+Lz = 100
+
+# Initial stratification
+∂θ∂z = 0.01
+
+# Simulation time
+days = 8
+end_time = day * days
+
+# Data directory
+base_dir = "ocean_convection_data"
+mkpath(base_dir)
+
+# Physical constants.
+const f₀ = 1e-4  # Coriolis parameter [s⁻¹]
+const ρ₀ = 1027  # Density of seawater [kg/m³]
+const cₚ = 4000  # Specific heat capacity of seawater at constant pressure [J/(kg·K)]
+
+# Surface heat flux (negative values imply cooling)
+@inline Q(x, y, t) = -100
+Q_str = "-100"
+
+# Surface wind stress along the x-direction
+@inline τx(x, y, t) = 0
+τx_str = "0"
+
+# Convert heat flux and wind stress to boundary conditions.
+@inline Fu(x, y, t) = τx(x, y, t) / ρ₀
+@inline Fθ(x, y, t) =  Q(x, y, t) / (ρ₀ * cₚ)
+
+Fu_str = "τx(x, y, t) / ρ₀"
+Fθ_str = "Q(x, y, t) / (ρ₀ * cₚ)"
+
+u_top_bc = FunctionBoundaryCondition(Flux, :z, Face, Cell, Fu)
+θ_top_bc = FunctionBoundaryCondition(Flux, :z, Cell, Cell, Fθ)
+
+# Define boundary conditions
+ubcs = HorizontallyPeriodicBCs(   top = u_top_bc)
+θbcs = HorizontallyPeriodicBCs(   top = θ_top_bc,
+                               bottom = BoundaryCondition(Gradient, ∂θ∂z))
 Sbcs = HorizontallyPeriodicBCs(   top = BoundaryCondition(Gradient, 0),
-                               bottom = BoundaryCondition(Gradient, ∂T∂z))
+                               bottom = BoundaryCondition(Gradient, ∂θ∂z))
 
+# Create model
 model = Model(float_type = FT,
             architecture = arch,
-	            grid = RegularCartesianGrid(N=(Nx, Ny, Nz), L=(Lx, Ly, Lz)),
-                coriolis = FPlane(FT; f=1e-4),
+	                grid = RegularCartesianGrid(FT; size=(Nx, Ny, Nz), length=(Lx, Ly, Lz)),
+                coriolis = FPlane(FT; f=f₀),
                 buoyancy = SeawaterBuoyancy(FT; equation_of_state=LinearEquationOfState(β=0)),
                  closure = AnisotropicMinimumDissipation(FT),
-     boundary_conditions = BoundaryConditions(u=ubcs, T=Tbcs, S=Sbcs))
+     boundary_conditions = BoundaryConditions(u=ubcs, T=θbcs, S=Sbcs))
 
-# Set initial condition. Initial velocity and salinity fluctuations needed for AMD.
+# Set initial condition.
 ε(μ) = μ * randn() # noise
-T₀(x, y, z) = 20 + ∂T∂z * z + ε(1e-10) * exp(z/25)
-S₀(x, y, z) = T₀(x, y, z)
+θ₀(x, y, z) = 20 + ∂θ∂z * z + ε(1e-10) * exp(4z/Lz)
+S₀(x, y, z) = θ₀(x, y, z)
 
-# Noise is needed so that AMD does not blow up due to dividing by ∇u or ∇S.
-u₀(x, y, z) = ε(1e-10) * exp(z/25)
-v₀(x, y, z) = ε(1e-10) * exp(z/25)
-w₀(x, y, z) = ε(1e-10) * exp(z/25)
+set_ic!(model, T=θ₀, S=S₀)
 
-set_ic!(model, u=u₀, v=v₀, w=w₀, T=T₀, S=S₀)
-
+# Function that saves metadata with every output file.
 function init_save_parameters_and_bcs(file, model)
+    file["parameters/coriolis_parameter"] = f₀
     file["parameters/density"] = ρ₀
     file["parameters/specific_heat_capacity"] = cₚ
     file["parameters/viscosity"] = model.closure.ν
-    file["parameters/diffusivity"] = model.closure.κ
-    file["parameters/surface_cooling"] = Q
-    file["parameters/temperature_gradient"] = ∂T∂z
-    file["parameters/wind_stress"] = τ
-    file["boundary_conditions/top/FT"] = Fθ
-    file["boundary_conditions/top/Fu"] = Fu
-    file["boundary_conditions/bottom/dTdz"] = ∂T∂z
+    file["parameters/diffusivity"] = model.closure.κ.T
+    file["parameters/diffusivity_T"] = model.closure.κ.T
+    file["parameters/diffusivity_S"] = model.closure.κ.S
+    file["parameters/surface_cooling"] = Q_str
+    file["parameters/temperature_gradient"] = ∂θ∂z
+    file["parameters/wind_stress_x"] = τx_str
+    file["boundary_conditions/top/FT"] = Fθ_str
+    file["boundary_conditions/top/Fu"] = Fu_str
+    file["boundary_conditions/bottom/dTdz"] = ∂θ∂z
 end
 
+# Saving 3D fields to JLD2 output files.
 fields = Dict(
-    :u => model -> Array(model.velocities.u.data.parent),
-    :v => model -> Array(model.velocities.v.data.parent),
-    :w => model -> Array(model.velocities.w.data.parent),
-    :T => model -> Array(model.tracers.T.data.parent),
-    :S => model -> Array(model.tracers.S.data.parent),
-    :kappaT => model -> Array(model.diffusivities.κₑ.T.data.parent),
-    :kappaS => model -> Array(model.diffusivities.κₑ.S.data.parent),
-    :nu => model -> Array(model.diffusivities.νₑ.data.parent))
+     :u => model -> Array(model.velocities.u.data.parent),
+     :v => model -> Array(model.velocities.v.data.parent),
+     :w => model -> Array(model.velocities.w.data.parent),
+     :T => model -> Array(model.tracers.T.data.parent),
+     :S => model -> Array(model.tracers.S.data.parent),
+    :nu => model -> Array(model.diffusivities.νₑ.data.parent),
+:kappaT => model -> Array(model.diffusivities.κₑ.T.data.parent),
+:kappaS => model -> Array(model.diffusivities.κₑ.S.data.parent)
+)
 
-field_writer = JLD2OutputWriter(model, fields; dir=base_dir, prefix=prefix * "_fields",
+field_writer = JLD2OutputWriter(model, fields; dir=base_dir, prefix="ocean_convection_fields",
                                 init=init_save_parameters_and_bcs,
                                 max_filesize=100GiB, interval=6hour, force=true, verbose=true)
 push!(model.output_writers, field_writer)
 
-# Set up diagnostics.
+####
+#### Set up diagnostics.
+####
+
+# NaN checker will abort simulation if NaNs are produced.
 push!(model.diagnostics, NaNChecker(model; frequency=1000, fields=Dict(:w => model.velocities.w)))
 
-Δtₚ = 10minute  # Time interval for computing and saving profiles.
+# Time interval for computing and saving profiles.
+Δtₚ = 10minute
 
-Up = HorizontalAverage(model, model.velocities.u;       return_type=Array)
-Vp = HorizontalAverage(model, model.velocities.v;       return_type=Array)
-Wp = HorizontalAverage(model, model.velocities.w;       return_type=Array)
-Tp = HorizontalAverage(model, model.tracers.T;          return_type=Array)
-Sp = HorizontalAverage(model, model.tracers.S;          return_type=Array)
-νp = HorizontalAverage(model, model.diffusivities.νₑ;   return_type=Array)
+# Define horizontal average diagnostics.
+ Up = HorizontalAverage(model.velocities.u;       return_type=Array)
+ Vp = HorizontalAverage(model.velocities.v;       return_type=Array)
+ Wp = HorizontalAverage(model.velocities.w;       return_type=Array)
+ Tp = HorizontalAverage(model.tracers.T;          return_type=Array)
+ Sp = HorizontalAverage(model.tracers.S;          return_type=Array)
+ νp = HorizontalAverage(model.diffusivities.νₑ;   return_type=Array)
+κTp = HorizontalAverage(model.diffusivities.κₑ.T; return_type=Array)
+κSp = HorizontalAverage(model.diffusivities.κₑ.S; return_type=Array)
 
-κTp = HorizontalAverage(model, model.diffusivities.κₑ.T; return_type=Array)
-κSp = HorizontalAverage(model, model.diffusivities.κₑ.S; return_type=Array)
+u = model.velocities.u
+v = model.velocities.v
+w = model.velocities.w
+T = model.tracers.T
+S = model.tracers.S
 
-uu = HorizontalAverage(model, [model.velocities.u, model.velocities.u]; return_type=Array)
-vv = HorizontalAverage(model, [model.velocities.v, model.velocities.v]; return_type=Array)
-ww = HorizontalAverage(model, [model.velocities.w, model.velocities.w]; return_type=Array)
-uv = HorizontalAverage(model, [model.velocities.u, model.velocities.v]; return_type=Array)
-uw = HorizontalAverage(model, [model.velocities.u, model.velocities.w]; return_type=Array)
-vw = HorizontalAverage(model, [model.velocities.v, model.velocities.w]; return_type=Array)
-wT = HorizontalAverage(model, [model.velocities.w, model.tracers.T];    return_type=Array)
-wS = HorizontalAverage(model, [model.velocities.w, model.tracers.S];    return_type=Array)
+uu = HorizontalAverage(u*u, model; return_type=Array)
+vv = HorizontalAverage(v*v, model; return_type=Array)
+ww = HorizontalAverage(w*w, model; return_type=Array)
+uv = HorizontalAverage(u*v, model; return_type=Array)
+uw = HorizontalAverage(u*w, model; return_type=Array)
+vw = HorizontalAverage(v*w, model; return_type=Array)
+wT = HorizontalAverage(w*T, model; return_type=Array)
+wS = HorizontalAverage(w*S, model; return_type=Array)
 
-function flux!(grid, K0, K, T, tmp)
-    @loop for k in (1:grid.Nz; (blockIdx().z - 1) * blockDim().z + threadIdx().z)
-        @loop for j in (1:grid.Ny; (blockIdx().y - 1) * blockDim().y + threadIdx().y)
-            @loop for i in (1:grid.Nx; (blockIdx().x - 1) * blockDim().x + threadIdx().x)
-                @inbounds tmp[i, j, k] = (K0 + K[i, j, k]) * (T[i, j, k] - T[i, j, k-1]) / grid.Δz
-            end
-        end
-    end
-end
-
-function K∂zT(model::Model, havg, K, T)
-    K, T = K.data, T.data
-    Nz, Δz = model.grid.Nz, model.grid.Δz
-    arch, grid = model.architecture, model.grid
-
-    fill_halo_regions!(K, model.boundary_conditions.pressure,    model.architecture, model.grid)
-    fill_halo_regions!(T, model.boundary_conditions.solution[4], model.architecture, model.grid)
-
-    # Use pressure as scratch space for the product of fields.
-    tmp = model.pressures.pNHS.data.parent
-
-    @launch device(arch) config=launch_config(grid, 3) flux!(grid, 0, K, T, tmp)
-
-    zero_halo_regions!(tmp, model.grid)
-
-    sum!(havg.profile, tmp)
-    normalize_horizontal_sum!(havg, model.grid)
-
-    return Array(havg.profile)
-end
-
-function K∂zT(model::Model, havg, K₀, K, T)
-    K, T = K.data, T.data
-    Nz, Δz = model.grid.Nz, model.grid.Δz
-    arch, grid = model.architecture, model.grid
-
-    fill_halo_regions!(K, model.boundary_conditions.pressure,    model.architecture, model.grid)
-    fill_halo_regions!(T, model.boundary_conditions.solution[4], model.architecture, model.grid)
-
-    # Use pressure as scratch space for the product of fields.
-    tmp = model.pressures.pNHS.data.parent
-
-    @launch device(arch) config=launch_config(grid, 3) flux!(grid, K₀, K, T, tmp)
-
-    zero_halo_regions!(tmp, model.grid)
-
-    sum!(havg.profile, tmp)
-    normalize_horizontal_sum!(havg, model.grid)
-
-    return Array(havg.profile)
-end
-
+# Create output writer that writes vertical profiles to JLD2 output files.
 profiles = Dict(
      :u => model -> Up(model),
      :v => model -> Vp(model),
@@ -235,21 +162,10 @@ profiles = Dict(
     :uw => model -> uw(model),
     :vw => model -> vw(model),
     :wT => model -> wT(model),
-    :wS => model -> wS(model),
+    :wS => model -> wS(model)
+)
 
-   :nu_dudz => model -> K∂zT(model, Up, model.diffusivities.νₑ, model.velocities.u),
-   :nu_dvdz => model -> K∂zT(model, Up, model.diffusivities.νₑ, model.velocities.v),
-   :nu_dwdz => model -> K∂zT(model, Up, model.diffusivities.νₑ, model.velocities.w),
-:nuSGS_dudz => model -> K∂zT(model, Up, model.closure.ν, model.diffusivities.νₑ, model.velocities.u),
-:nuSGS_dvdz => model -> K∂zT(model, Up, model.closure.ν, model.diffusivities.νₑ, model.velocities.v),
-:nuSGS_dwdz => model -> K∂zT(model, Up, model.closure.ν, model.diffusivities.νₑ, model.velocities.w),
-
-   :kappaT_dTdz => model -> K∂zT(model, Up, model.diffusivities.κₑ.T, model.tracers.T),
-:kappaTSGS_dTdz => model -> K∂zT(model, Up, model.closure.κ, model.diffusivities.κₑ.T, model.tracers.T),
-   :kappaS_dSdz => model -> K∂zT(model, Up, model.diffusivities.κₑ.S, model.tracers.S),
-:kappaSSGS_dSdz => model -> K∂zT(model, Up, model.closure.κ, model.diffusivities.κₑ.S, model.tracers.S))
-
-profile_writer = JLD2OutputWriter(model, profiles; dir=base_dir, prefix=prefix * "_profiles",
+profile_writer = JLD2OutputWriter(model, profiles; dir=base_dir, prefix="ocean_convection_profiles",
                                   init=init_save_parameters_and_bcs,
                                   interval=Δtₚ, max_filesize=25GiB, force=true, verbose=true)
 
@@ -258,20 +174,23 @@ push!(model.output_writers, profile_writer)
 # Wizard utility that calculates safe adaptive time steps.
 wizard = TimeStepWizard(cfl=0.25, Δt=3.0, max_change=1.2, max_Δt=30.0)
 
-# Take Ni "intermediate" time steps at a time before printing a progress
-# statement and updating the time step.
+# Number of time steps to perform at a time before printing a progress
+# statement and updating the adaptive time step.
 Ni = 50
 
 while model.clock.time < end_time
     walltime = @elapsed time_step!(model; Nt=Ni, Δt=wizard.Δt)
 
+    # Calculate simulation progress in %.
     progress = 100 * (model.clock.time / end_time)
 
+    # Calculate advective CFL number.
     umax = maximum(abs, model.velocities.u.data.parent)
     vmax = maximum(abs, model.velocities.v.data.parent)
     wmax = maximum(abs, model.velocities.w.data.parent)
     CFL = wizard.Δt / cell_advection_timescale(model)
 
+    # Calculate diffusive CFL number.
     νmax = maximum(model.diffusivities.νₑ.data.parent)
     κmax = maximum(model.diffusivities.κₑ.T.data.parent)
 
@@ -279,8 +198,10 @@ while model.clock.time < end_time
     νCFL = wizard.Δt / (Δ^2 / νmax)
     κCFL = wizard.Δt / (Δ^2 / κmax)
 
+    # Calculate a new adaptive time step.
     update_Δt!(wizard, model)
 
+    # Print progress statement.
     @printf("[%06.2f%%] i: %d, t: %5.2f days, umax: (%6.3g, %6.3g, %6.3g) m/s, CFL: %6.4g, νκmax: (%6.3g, %6.3g), νκCFL: (%6.4g, %6.4g), next Δt: %8.5g, ⟨wall time⟩: %s\n",
             progress, model.clock.iteration, model.clock.time / day,
             umax, vmax, wmax, CFL, νmax, κmax, νCFL, κCFL,
