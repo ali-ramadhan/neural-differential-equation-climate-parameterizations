@@ -53,9 +53,18 @@ cb = function ()  # callback function to observe training
   # plot current prediction against data
   # cur_pred = Flux.data(predict_n_ode())
 
-  loss < 1 && Flux.stop()
+  loss < 0.1 && Flux.stop()
 end
 
 cb()
 Flux.train!(loss_n_ode, ps, data, opt, cb = cb)
+
+nn_pred = Flux.data(predict_n_ode())
+anim = @animate for n=1:datasize
+    @show n  
+    plot(x, ode_data[:, n], ylim=(0, 1), label="data", show=false)
+    plot!(x, nn_pred[:, n], ylim=(0, 1), label="Neural ODE", show=false)
+end
+
+gif(anim, "neural_diffusion.gif", fps = 5)
 
