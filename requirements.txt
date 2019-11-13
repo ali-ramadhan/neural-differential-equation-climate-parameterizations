@@ -1,0 +1,8 @@
+#Julia 1.2 packages
+FileIO
+JLD2
+Stastics
+Flux
+DifferentialEquations
+DiffEqFlux
+Plots
