@@ -147,13 +147,13 @@ for i in 1:Nt-1
      ∂zTₙ[:, i] .= Dzᶠ * T_cs[:, i]
 end
 
-N_skip = 100  # Skip first N_skip iterations to avoid learning transients?
+N_skip = 0  # Skip first N_skip iterations to avoid learning transients?
 N = 32  # Number of training data pairs.
 
 rinds = randperm(Nt-N_skip)[1:N]
 
-pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in rinds]
-training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in rinds]
+pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in 1:N]
+training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
 
 #####
 ##### Create neural network
@@ -202,7 +202,7 @@ loss_function(Tₙ, Tₙ₊₁) = sum(abs2, Tₙ₊₁ .- neural_pde_prediction(
 ##### Choose optimization algorithm
 #####
 
-opt = ADAM(0.01)
+opt = ADAM(1e-2)
 
 #####
 ##### Callback function to observe training.
@@ -212,15 +212,40 @@ function cb()
     nn_pred = neural_ode(dTdt_NN, Tₙ[:, 1], (t[1], t[N]), Tsit5(), saveat=t[1:N], reltol=1e-4) |> Flux.data
     loss = sum(abs2, T_cs[:, 1:N] .- nn_pred)
     println("total loss = $loss")
+    return loss
 end
 
 #####
 ##### Train!
 #####
 
-epochs = 2
+epochs = 10
+best_loss = Inf
+last_improvement = 0
 
-for e in 1:epochs
-    @info "Epoch $e"
+for epoch_idx in 1:epochs
+    global best_loss, last_improvement
+
+    @info "Epoch $epoch_idx"
     Flux.train!(loss_function, NN_params, training_data, opt, cb=cb) # cb=Flux.throttle(cb, 20))
+    
+    loss = cb()
+
+    if loss <= best_loss
+        @info("Record low loss! Saving neural network out to dTdt_NN.bson")
+        BSON.@save "dTdt_NN.bson" dTdt_NN
+        best_loss = loss
+        last_improvement = epoch_idx
+    end
+   
+    # If we haven't seen improvement in 2 epochs, drop our learning rate:
+    if epoch_idx - last_improvement >= 2 && opt.eta > 1e-6
+        opt.eta /= 5.0
+        @warn("Haven't improved in a while, dropping learning rate to $(opt.eta)")
+
+        # After dropping learning rate, give it a few epochs to improve
+        last_improvement = epoch_idx
+    end 
 end
+
+
