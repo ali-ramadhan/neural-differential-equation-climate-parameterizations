@@ -166,6 +166,7 @@ training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
 # Use NN to parameterize a diffusivity or κ profile.
 dTdt_NN = Chain(T -> Dzᶠ*T,
                Dense(cr+2,  2cr, tanh),
+               Dense(2cr, 2cr, tanh),
                Dense(2cr,  cr+2),
                NNDzT -> Dzᶜ * NNDzT)
 
@@ -186,7 +187,7 @@ end
 
 pre_train_epochs = 5
 for _ in 1:pre_train_epochs
-    Flux.train!(pre_loss_function, NN_params, pre_training_data, popt, cb = precb)
+    Flux.train!(pre_loss_function, NN_params, pre_training_data, popt, cb = Flux.throttle(precb, 5))
 end
 
 #####
@@ -202,17 +203,20 @@ loss_function(Tₙ, Tₙ₊₁) = sum(abs2, Tₙ₊₁ .- neural_pde_prediction(
 ##### Choose optimization algorithm
 #####
 
-opt = ADAM(1e-2)
+opt = ADAM(1e-3)
 
 #####
 ##### Callback function to observe training.
 #####
 
 function cb()
+    train_loss = sum([loss_function(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N])
+
     nn_pred = neural_ode(dTdt_NN, Tₙ[:, 1], (t[1], t[N]), Tsit5(), saveat=t[1:N], reltol=1e-4) |> Flux.data
-    loss = sum(abs2, T_cs[:, 1:N] .- nn_pred)
-    println("total loss = $loss")
-    return loss
+    test_loss = sum(abs2, T_cs[:, 1:N] .- nn_pred)
+    
+    println("train_loss = $train_loss, test_loss = $test_loss")
+    return train_loss
 end
 
 #####
@@ -227,7 +231,7 @@ for epoch_idx in 1:epochs
     global best_loss, last_improvement
 
     @info "Epoch $epoch_idx"
-    Flux.train!(loss_function, NN_params, training_data, opt, cb=cb) # cb=Flux.throttle(cb, 20))
+    Flux.train!(loss_function, NN_params, training_data, opt, cb=cb) # cb=Flux.throttle(cb, 10))
     
     loss = cb()
 
