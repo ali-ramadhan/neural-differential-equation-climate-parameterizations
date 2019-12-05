@@ -248,4 +248,23 @@ for epoch_idx in 1:epochs
     end 
 end
 
+#####
+##### Run the neural PDE forward to see how well it performs just by itself.
+#####
+
+nn_pred = neural_ode(dTdt_NN, Tₙ[:, 1], (t[1], t[end]), Tsit5(), saveat=t, reltol=1e-4) |> Flux.data
+
+z_cs = coarse_grain(z, cr)
+
+anim = @animate for n=1:10:Nt
+    t_str = @sprintf("%.2f", t[n] / 86400)
+    plot(T_cs[2:end-1, n], z_cs, linewidth=2,
+         xlim=(19, 20), ylim=(-100, 0), label="Data",
+         xlabel="Temperature (C)", ylabel="Depth (z)",
+         title="Deepening mixed layer: $t_str days",
+         legend=:bottomright, show=false)
+    plot!(nn_pred[2:end-1, n], z_cs, linewidth=2, label="Neural PDE", show=false)
+end
+
+gif(anim, "deepening_mixed_layer_neural_PDE.gif", fps=15)
 
