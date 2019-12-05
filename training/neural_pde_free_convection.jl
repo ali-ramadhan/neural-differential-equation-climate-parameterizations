@@ -1,4 +1,5 @@
 using Printf
+using Random
 using Statistics
 using LinearAlgebra
 
@@ -7,6 +8,7 @@ using DifferentialEquations
 using DiffEqFlux
 
 using JLD2
+using BSON
 using Plots
 
 using Flux: @epochs
@@ -148,8 +150,10 @@ end
 N_skip = 100  # Skip first N_skip iterations to avoid learning transients?
 N = 32  # Number of training data pairs.
 
-pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in N_skip:N_skip+N]
-training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in N_skip:N_skip+N]
+rinds = randperm(Nt-N_skip)[1:N]
+
+pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in rinds]
+training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in rinds]
 
 #####
 ##### Create neural network
