@@ -261,7 +261,7 @@ for epoch_idx in 1:epochs
    
     # If we haven't seen improvement in 2 epochs, drop our learning rate:
     if epoch_idx - last_improvement >= 2 && opt.eta > 1e-6
-        opt.eta /= 5.0
+        opt.eta /= 2.0
         @warn("Haven't improved in a while, dropping learning rate to $(opt.eta)")
 
         # After dropping learning rate, give it a few epochs to improve
