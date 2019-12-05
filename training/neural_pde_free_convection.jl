@@ -164,7 +164,7 @@ training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
 
 heat_flux = zeros(cr+2)
 
-Q  = file["parameters/surface_cooling"]
+Q  = -100 # file["parameters/surface_cooling"]
 ρ₀ = file["parameters/density"]
 cₚ = file["parameters/specific_heat_capacity"]
 
@@ -181,7 +181,6 @@ heat_flux[2] = Q / (ρ₀ * cₚ)
 # Use NN to parameterize a diffusivity or κ profile.
 dTdt_NN = Chain(T -> Dzᶠ*T,
               Dense(cr+2,  2cr, tanh),
-              Dense(2cr, 2cr, tanh),
               Dense(2cr,  cr+2),
               NNDzT -> Dzᶜ * NNDzT + heat_flux)
 
