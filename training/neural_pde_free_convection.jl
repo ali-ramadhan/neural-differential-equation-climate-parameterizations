@@ -38,7 +38,7 @@ end
 #####
 
 z = file["grid/zC"]
-
+#=
 anim = @animate for n=1:10:Nt
     t_str = @sprintf("%.2f", t[n] / 86400)
     plot(T[n, :], z, linewidth=2,
@@ -48,7 +48,7 @@ anim = @animate for n=1:10:Nt
 end
 
 gif(anim, "deepening_mixed_layer.gif", fps=15)
-
+=#
 #####
 ##### Coarse grain data to 32 vertical levels (plus halo regions)
 #####
@@ -88,7 +88,7 @@ wT_cs[end, :] .= wT_cs[end-1, :]
 #####
 ##### Plot coarse temperature and wT profiles
 #####
-
+#=
 @info "Plotting coarse temperature profile..."
 
 anim = @animate for n=1:10:Nt
@@ -106,33 +106,13 @@ gif(anim, "deepening_mixed_layer_T_coarse.gif", fps=15)
 anim = @animate for n=1:10:Nt
     t_str = @sprintf("%.2f", t[n] / 86400)
     plot(wT_cs[2:cr+1, n], z_cs, linewidth=2,
-         xlim=(-1e5, 1e5), ylim=(-100, 0), label="",
+         xlim=(-1e-4, 1e-4), ylim=(-100, 0), label="",
          xlabel="Temperature (C)", ylabel="Depth (z)",
          title="Deepening mixed layer: $t_str days", show=false)
 end
 
 gif(anim, "deepening_mixed_layer_wT_coarse.gif", fps=15)
-
-#####
-##### Create training data
-#####
-
-Tₙ   = zeros(coarse_resolution+2, Nt-1)
-Tₙ₊₁ = zeros(coarse_resolution+2, Nt-1)
-wTₙ   = zeros(coarse_resolution+2, Nt-1)
-
-for i in 1:Nt-1
-       Tₙ[:, i] .=  T_cs[:,   i]
-     Tₙ₊₁[:, i] .=  T_cs[:, i+1]
-      wTₙ[:, i] .= wT_cs[:,   i]
-end
-
-N_skip = 10  # Skip first N_skip iterations to avoid learning transients?
-N = 32  # Number of training data pairs.
-
-pre_training_data = [(Tₙ[:, i], wTₙ[:, i]) for i in N_skip:N_skip+N]
-training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in N_skip:N_skip+N]
-
+=#
 #####
 ##### Generate differentiation matrices
 #####
@@ -150,18 +130,40 @@ Dzᶠ[1, 1] = 0
 Dzᶜ[cr, cr] = 0
 
 #####
+##### Create training data
+#####
+
+Tₙ   = zeros(cr+2, Nt-1)
+Tₙ₊₁ = zeros(cr+2, Nt-1)
+wTₙ  = zeros(cr+2, Nt-1)
+∂zTₙ = zeros(cr+2, Nt-1)
+
+for i in 1:Nt-1
+       Tₙ[:, i] .=  T_cs[:,   i]
+     Tₙ₊₁[:, i] .=  T_cs[:, i+1]
+      wTₙ[:, i] .= wT_cs[:,   i]
+     ∂zTₙ[:, i] .= Dzᶠ * T_cs[:, i]
+end
+
+N_skip = 100  # Skip first N_skip iterations to avoid learning transients?
+N = 32  # Number of training data pairs.
+
+pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in N_skip:N_skip+N]
+training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in N_skip:N_skip+N]
+
+#####
 ##### Create neural network
 #####
 
 # Complete black box right-hand-side.
-dTdt_NN = Chain(Dense(cr+2,  2cr, tanh),
-                Dense(2cr,  cr+2))
+#  dTdt_NN = Chain(Dense(cr+2,  2cr, tanh),
+#                  Dense(2cr,  cr+2))
 
 # Use NN to parameterize a diffusivity or κ profile.
-# dTdt_NN = Chain(T -> Dzᶠ*T,
-#                 Dense(cr+2,  2cr, tanh),
-#                 Dense(2cr,  cr+2),
-#                 NNDzT -> Dzᶜ * NNDzT)
+dTdt_NN = Chain(T -> Dzᶠ*T,
+               Dense(cr+2,  2cr, tanh),
+               Dense(2cr,  cr+2),
+               NNDzT -> Dzᶜ * NNDzT)
 
 NN_params = Flux.params(dTdt_NN)
 
@@ -169,7 +171,7 @@ NN_params = Flux.params(dTdt_NN)
 ##### Pre-train the neural network on (T, wT) data pairs
 #####
 
-pre_loss_function(Tₙ, wTₙ) = sum(abs2, dTdt_NN(Tₙ) .- wTₙ)
+pre_loss_function(∂zTₙ, wTₙ) = sum(abs2, dTdt_NN(∂zTₙ) .- wTₙ)
 
 popt = ADAM(0.01)
 
@@ -178,7 +180,7 @@ function precb()
     println("loss = $loss")
 end
 
-pre_train_epochs = 25
+pre_train_epochs = 5
 for _ in 1:pre_train_epochs
     Flux.train!(pre_loss_function, NN_params, pre_training_data, popt, cb = precb)
 end
