@@ -128,32 +128,47 @@ Dzᶠ = 1/cr_Δz * Tridiagonal(-ones(cr+1), ones(cr+2), zeros(cr+1))
 Dzᶜ = 1/cr_Δz * Tridiagonal(zeros(cr+1), -ones(cr+2), ones(cr+1))
 
 # Impose boundary condition that derivative goes to zero at top and bottom.
-Dzᶠ[1, 1] = 0
-Dzᶜ[cr, cr] = 0
+# Dzᶠ[1, 1] = 0
+# Dzᶜ[cr, cr] = 0
 
 #####
 ##### Create training data
 #####
 
-Tₙ   = zeros(cr+2, Nt-1)
-Tₙ₊₁ = zeros(cr+2, Nt-1)
-wTₙ  = zeros(cr+2, Nt-1)
-∂zTₙ = zeros(cr+2, Nt-1)
+Tₙ    = zeros(cr+2, Nt-1)
+Tₙ₊₁  = zeros(cr+2, Nt-1)
+wTₙ   = zeros(cr+2, Nt-1)
+∂zTₙ  = zeros(cr+2, Nt-1)
+∂zwTₙ = zeros(cr+2, Nt-1)
 
 for i in 1:Nt-1
        Tₙ[:, i] .=  T_cs[:,   i]
      Tₙ₊₁[:, i] .=  T_cs[:, i+1]
       wTₙ[:, i] .= wT_cs[:,   i]
      ∂zTₙ[:, i] .= Dzᶠ * T_cs[:, i]
+    ∂zwTₙ[:, i] .= Dzᶜ * wT_cs[:, i]
 end
 
 N_skip = 0  # Skip first N_skip iterations to avoid learning transients?
-N = 32  # Number of training data pairs.
+N = 3  # Number of training data pairs.
 
-rinds = randperm(Nt-N_skip)[1:N]
+# rinds = randperm(Nt-N_skip)[1:N]
 
+# pre_training_data = [(Tₙ[:, i], ∂zwTₙ[:, i]) for i in 1:N]
 pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in 1:N]
 training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
+
+#####
+##### Create heat flux vector
+#####
+
+heat_flux = zeros(cr+2)
+
+Q  = file["parameters/surface_cooling"]
+ρ₀ = file["parameters/density"]
+cₚ = file["parameters/specific_heat_capacity"]
+
+heat_flux[2] = Q / (ρ₀ * cₚ)
 
 #####
 ##### Create neural network
@@ -165,10 +180,10 @@ training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
 
 # Use NN to parameterize a diffusivity or κ profile.
 dTdt_NN = Chain(T -> Dzᶠ*T,
-               Dense(cr+2,  2cr, tanh),
-               Dense(2cr, 2cr, tanh),
-               Dense(2cr,  cr+2),
-               NNDzT -> Dzᶜ * NNDzT)
+              Dense(cr+2,  2cr, tanh),
+              Dense(2cr, 2cr, tanh),
+              Dense(2cr,  cr+2),
+              NNDzT -> Dzᶜ * NNDzT + heat_flux)
 
 NN_params = Flux.params(dTdt_NN)
 
@@ -218,6 +233,8 @@ function cb()
     println("train_loss = $train_loss, test_loss = $test_loss")
     return train_loss
 end
+
+cb()
 
 #####
 ##### Train!
