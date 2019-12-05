@@ -217,7 +217,7 @@ loss_function(Tₙ, Tₙ₊₁) = sum(abs2, Tₙ₊₁ .- neural_pde_prediction(
 ##### Choose optimization algorithm
 #####
 
-opt = ADAM(1e-3)
+opt = ADAM(0.1)
 
 #####
 ##### Callback function to observe training.
