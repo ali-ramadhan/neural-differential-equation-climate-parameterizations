@@ -155,7 +155,7 @@ N = 3  # Number of training data pairs.
 # rinds = randperm(Nt-N_skip)[1:N]
 
 # pre_training_data = [(Tₙ[:, i], ∂zwTₙ[:, i]) for i in 1:N]
-pre_training_data = [(∂zTₙ[:, i], wTₙ[:, i]) for i in 1:N]
+pre_training_data = [(∂zTₙ[:, i], -wTₙ[:, i]) for i in 1:N]
 training_data = [(Tₙ[:, i], Tₙ₊₁[:, i]) for i in 1:N]
 
 #####
