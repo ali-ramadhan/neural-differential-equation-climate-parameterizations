@@ -168,7 +168,7 @@ Q  = -100 # file["parameters/surface_cooling"]
 ρ₀ = file["parameters/density"]
 cₚ = file["parameters/specific_heat_capacity"]
 
-heat_flux[2] = Q / (ρ₀ * cₚ)
+heat_flux[2] = Q / (ρ₀ * cₚ * cr_Δz)
 
 #####
 ##### Create neural network
